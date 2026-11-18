@@ -84,7 +84,6 @@ def add_booking_to_sheet(name, phone, service, day, time_slot):
 
 def delete_booking_row(row_index_in_df):
     ws = get_gsheet()
-    # الصف الأول هو العناوين (index 1)، وأول صف بيانات في df هو index 0 -> يقابله صف 2 في الشيت
     ws.delete_rows(int(row_index_in_df) + 2)
 
 # ==========================================
@@ -189,8 +188,22 @@ with tab_chat:
 
         with st.chat_message("assistant"):
             with st.spinner("جاري فحص المواعيد والرد..."):
-                client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
                 reply_text = None
+                last_err = ""
+                
+                # دعم مفاتيح AI Studio الجديدة (AQ. -> Bearer Token) والكلاسيكية (AIza -> api_key)
+                if api_key.startswith("AQ."):
+                    client = genai.Client(
+                        http_options={
+                            'api_version': 'v1beta',
+                            'headers': {'Authorization': f'Bearer {api_key}'}
+                        }
+                    )
+                else:
+                    client = genai.Client(
+                        api_key=api_key,
+                        http_options={'api_version': 'v1beta'}
+                    )
                 
                 try:
                     available_models = [
@@ -210,10 +223,11 @@ with tab_chat:
                             )
                             reply_text = response.text
                             break
-                        except Exception:
+                        except Exception as e:
+                            last_err = str(e)
                             continue
                 except Exception as e:
-                    st.error(f"خطأ في الاتصال بالذكاء الاصطناعي: {e}")
+                    last_err = str(e)
 
                 if reply_text:
                     booking_match = re.search(r"BOOKING_DATA:\s*(\{.*?\})", reply_text)
@@ -235,6 +249,8 @@ with tab_chat:
 
                     st.markdown(reply_text)
                     st.session_state.messages.append({"role": "assistant", "content": reply_text})
+                else:
+                    st.error(f"تعذر الرد من الموديل. التفاصيل: {last_err}")
 
 # ------------------------------------------
 # TAB 2: لوحة تحكم الإدارة والمواعيد (CRM)
