@@ -191,19 +191,10 @@ with tab_chat:
                 reply_text = None
                 last_err = ""
                 
-                # دعم مفاتيح AI Studio الجديدة (AQ. -> Bearer Token) والكلاسيكية (AIza -> api_key)
-                if api_key.startswith("AQ."):
-                    client = genai.Client(
-                        http_options={
-                            'api_version': 'v1beta',
-                            'headers': {'Authorization': f'Bearer {api_key}'}
-                        }
-                    )
-                else:
-                    client = genai.Client(
-                        api_key=api_key,
-                        http_options={'api_version': 'v1beta'}
-                    )
+                client = genai.Client(
+                    api_key=api_key,
+                    http_options={'api_version': 'v1beta'}
+                )
                 
                 try:
                     available_models = [
