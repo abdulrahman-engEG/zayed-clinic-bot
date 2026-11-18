@@ -71,10 +71,23 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
     {user_question}
     """
 
-    with st.chat_message("assistant"):
+  with st.chat_message("assistant"):
         with st.spinner("بيكتب..."):
+            import google.genai as genai
+            
+            # اكتشاف أول موديل متاح ومفعل تلقائياً على مفتاح الـ API بتاعك
+            client = genai.Client(api_key=api_key)
+            available_models = [
+                m.name.replace("models/", "")
+                for m in client.models.list()
+                if "generateContent" in (m.supported_actions or [])
+                and "flash" in m.name.lower()
+            ]
+            # اختيار أول موديل Flash متاح (أو أي موديل نصي متاح كبديل)
+            chosen_model = available_models[0] if available_models else "gemini-flash-latest"
+
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model=chosen_model,
                 google_api_key=api_key,
                 temperature=0.2
             )
