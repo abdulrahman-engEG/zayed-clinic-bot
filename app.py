@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -13,7 +13,7 @@ from google.oauth2.credentials import Credentials
 import gspread
 
 # ==========================================
-# 1. إعدادات الهوية والبيزنس (تتغير بسهولة لأي عميل)
+# 1. إعدادات الهوية والبيزنس (White-Label Config)
 # ==========================================
 CLINIC_NAME = "عيادة زايد سمايل للأسنان"
 CLINIC_ICON = "🦷"
@@ -22,8 +22,7 @@ PDF_FILE_NAME = "clinic_data.pdf"
 SHEET_NAME = "Clinic_Bookings"
 ADMIN_PASSWORD = "1234"
 
-# مواعيد العمل الافتراضية لحساب الساعات المتاحة ومنع التضارب
-CLINIC_WORKING_HOURS = "من السبت إلى الخميس، من الساعة 1 ظهراً حتى 10 مساءً (مدة الكشف/الجلسة ساعة واحدة: 1م، 2م، 3م، 4م، 5م، 6م، 7م، 8م، 9م). الجمعة إجازة."
+CLINIC_WORKING_HOURS = "من السبت إلى الخميس، من الساعة 1 ظهراً حتى 10 مساءً (مدة الجلسة ساعة واحدة: 1م، 2م، 3م، 4م، 5م، 6م، 7م، 8م، 9م). الجمعة إجازة رسمية."
 
 st.set_page_config(page_title=f"نظام إدارة وحجز - {CLINIC_NAME}", page_icon=CLINIC_ICON, layout="wide")
 
@@ -52,8 +51,23 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. دوال الاتصال بـ Google Sheets (قراءة / إضافة / حذف)
+# 2. دوال التاريخ والاتصال بـ Google Sheets (CRUD)
 # ==========================================
+ARABIC_DAYS = {
+    "Monday": "الإثنين", "Tuesday": "الثلاثاء", "Wednesday": "الأربعاء",
+    "Thursday": "الخميس", "Friday": "الجمعة", "Saturday": "السبت", "Sunday": "الأحد"
+}
+
+def get_calendar_context():
+    now = datetime.now()
+    lines = []
+    for i in range(14):
+        d = now + timedelta(days=i)
+        day_ar = ARABIC_DAYS[d.strftime("%A")]
+        label = " (اليوم)" if i == 0 else (" (غداً)" if i == 1 else "")
+        lines.append(f"- {day_ar} الموافق {d.strftime('%Y-%m-%d')}{label}")
+    return "\n".join(lines)
+
 @st.cache_resource
 def get_gsheet():
     creds = Credentials.from_authorized_user_info(
@@ -63,9 +77,9 @@ def get_gsheet():
     gc = gspread.authorize(creds)
     sh = gc.open(SHEET_NAME)
     worksheet = sh.sheet1
-    # إضافة العناوين تلقائياً لو الشيت فاضي
+    expected_headers = ["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"]
     if not worksheet.row_values(1):
-        worksheet.append_row(["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "الساعة"])
+        worksheet.append_row(expected_headers)
     return worksheet
 
 def fetch_all_bookings():
@@ -75,12 +89,42 @@ def fetch_all_bookings():
         return pd.DataFrame(records)
     except Exception as e:
         st.warning(f"تعذر قراءة Google Sheet حالياً: {e}")
-        return pd.DataFrame(columns=["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "الساعة"])
+        return pd.DataFrame(columns=["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"])
 
-def add_booking_to_sheet(name, phone, service, day, time_slot):
+def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
     ws = get_gsheet()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    ws.append_row([now_str, name, str(phone), service, day, time_slot])
+    ws.append_row([now_str, name, str(phone), service, day, date_str, time_slot])
+
+def delete_booking_by_phone(phone):
+    ws = get_gsheet()
+    records = ws.get_all_records()
+    clean_target = re.sub(r"\D", "", str(phone))
+    deleted = False
+    # البحث من الأسفل للأعلى لتجنب تغير أرقام الصفوف عند الحذف
+    for idx in range(len(records) - 1, -1, -1):
+        row_phone = re.sub(r"\D", "", str(records[idx].get("رقم الموبايل", "")))
+        if clean_target and clean_target in row_phone:
+            ws.delete_rows(idx + 2)
+            deleted = True
+            break
+    return deleted
+
+def update_booking_by_phone(phone, new_day, new_date, new_time):
+    ws = get_gsheet()
+    records = ws.get_all_records()
+    clean_target = re.sub(r"\D", "", str(phone))
+    updated = False
+    for idx in range(len(records) - 1, -1, -1):
+        row_phone = re.sub(r"\D", "", str(records[idx].get("رقم الموبايل", "")))
+        if clean_target and clean_target in row_phone:
+            row_num = idx + 2
+            ws.update_cell(row_num, 5, new_day)
+            ws.update_cell(row_num, 6, new_date)
+            ws.update_cell(row_num, 7, new_time)
+            updated = True
+            break
+    return updated
 
 def delete_booking_row(row_index_in_df):
     ws = get_gsheet()
@@ -103,44 +147,43 @@ def load_knowledge_base():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     return FAISS.from_texts(chunks, embedding=embeddings)
 
-with st.spinner("جاري تحميل النظام وربط قاعدة البيانات..."):
+with st.spinner("جاري تحميل النظام الذكي وربط قاعدة البيانات..."):
     vector_store = load_knowledge_base()
 
 # ==========================================
-# 4. تقسيم الواجهة إلى Tab للعملاء و Tab للإدارة
+# 4. تقسيم الواجهة: واجهة العملاء + لوحة الإدارة
 # ==========================================
-tab_chat, tab_admin = st.tabs(["💬 مساعد العملاء والحجز الذكي", "📊 لوحة تحكم الإدارة والمواعيد"])
+tab_chat, tab_admin = st.tabs(["💬 مساعد العملاء والحجز الذكي", "📊 لوحة تحكم الإدارة والتحليلات"])
 
 # ------------------------------------------
-# TAB 1: واجهة محادثة العملاء + منع تضارب المواعيد
+# TAB 1: محادثة العملاء (حجز / تعديل / إلغاء / منع تضارب)
 # ------------------------------------------
 with tab_chat:
     col_header, col_wa = st.columns([3, 1])
     with col_header:
         st.title(f"{CLINIC_ICON} {CLINIC_NAME}")
-        st.caption("اسألني عن الأسعار، الخدمات، أو احجز ميعادك فوراً مع فحص المواعيد المتاحة.")
+        st.caption("اسأل عن الأسعار، احجز ميعادك بالتاريخ الدقيق، أو عدّل/ألغِ حجزك في ثوانٍ.")
     with col_wa:
         wa_link = f"https://wa.me/{WHATSAPP_NUMBER}?text=أهلاً،%20بتواصل%20معاكم%20من%20المساعد%20الذكي"
         st.markdown(f'<a href="{wa_link}" target="_blank" class="whatsapp-btn">💬 واتساب مباشر</a>', unsafe_allow_html=True)
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": f"أهلاً بحضرتك في {CLINIC_NAME}! 👋 إزاي أقدر أساعدك النهاردة؟ تقدر تسأل عن الأسعار أو تطلب حجز ميعاد مباشرة."}
+            {"role": "assistant", "content": f"أهلاً بحضرتك في {CLINIC_NAME}! 👋 إزاي أقدر أساعدك النهاردة؟ تقدر تسأل عن الأسعار، تحجز ميعاد جديد، أو تعدل/تلغي ميعادك الحالي."}
         ]
 
-    # أزرار سريعة
     q_cols = st.columns(4)
     quick_question = None
     if q_cols[0].button("💰 قائمة الأسعار"): quick_question = "إيه قائمة الأسعار عندكم؟"
-    if q_cols[1].button("🕒 مواعيد العمل"): quick_question = "إيه مواعيد العمل والعنوان؟"
-    if q_cols[2].button("💳 أنظمة التقسيط"): quick_question = "هل متاح تقسيط أو تأمين؟"
-    if q_cols[3].button("📅 حجز ميعاد"): quick_question = "عايز أحجز ميعاد"
+    if q_cols[1].button("📅 حجز ميعاد جديد"): quick_question = "عايز أحجز ميعاد جديد"
+    if q_cols[2].button("🔄 تعديل ميعادي"): quick_question = "عايز أعدل ميعاد حجزي"
+    if q_cols[3].button("❌ إلغاء حجز"): quick_question = "عايز ألغي حجزي"
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    typed_question = st.chat_input("اكتب سؤالك أو تفاصيل الميعاد المطلوب هنا...")
+    typed_question = st.chat_input("اكتب رسالتك هنا (حجز، استفسار، تعديل أو إلغاء)...")
     user_question = quick_question if quick_question else typed_question
 
     if user_question:
@@ -148,26 +191,32 @@ with tab_chat:
         with st.chat_message("user"):
             st.markdown(user_question)
 
-        # جلب المواعيد المحجوزة حالياً من Google Sheets لمنع التضارب
         df_current = fetch_all_bookings()
-        if not df_current.empty and "اليوم" in df_current.columns and "الساعة" in df_current.columns:
-            booked_list = [f"- يوم {row['اليوم']} الساعة {row['الساعة']}" for _, row in df_current.iterrows()]
+        if not df_current.empty and "التاريخ" in df_current.columns and "الساعة" in df_current.columns:
+            booked_list = [
+                f"- {row.get('اليوم', '')} ({row.get('التاريخ', '')}) الساعة {row.get('الساعة', '')} [اسم: {row.get('اسم العميل', '')} | موبايل: {row.get('رقم الموبايل', '')}]"
+                for _, row in df_current.iterrows()
+            ]
             booked_slots_text = "\n".join(booked_list)
         else:
             booked_slots_text = "لا توجد مواعيد محجوزة حالياً، جميع الساعات متاحة."
 
+        calendar_text = get_calendar_context()
         docs = vector_store.similarity_search(user_question, k=3)
         context = "\n\n".join([doc.page_content for doc in docs])
-        recent_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-6:]])
+        recent_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-8:]])
 
         prompt = f"""
         أنت موظف استقبال ومنسق مواعيد ذكي جداً في {CLINIC_NAME}.
         تحدث بالعامية المصرية المهذبة والودودة.
 
+        === التقويم الفعلي للأسبوعين القادمين (استخدمه لتحويل "بكرة" أو "الإثنين الجاي" لتاريخ YYYY-MM-DD بدقة) ===
+        {calendar_text}
+
         === مواعيد عمل العيادة ===
         {CLINIC_WORKING_HOURS}
 
-        === المواعيد المحجوزة بالفعل (ممنوع الحجز فيها نهائياً) ===
+        === سجل المواعيد المحجوزة حالياً ===
         {booked_slots_text}
 
         === بيانات العيادة والأسعار ===
@@ -180,14 +229,17 @@ with tab_chat:
         {user_question}
 
         === قواعد العمل الصارمة ===
-        1. **منع تضارب المواعيد واقتراح البدائل:** إذا طلب العميل يوماً معيناً (مثل الخميس)، افحص قائمة "المواعيد المحجوزة بالفعل". إذا كانت الساعة التي يطلبها محجوزة (أو إذا سأل عن المواعيد المتاحة في ذلك اليوم)، اعتذر بلطف عن الساعات المحجوزة واحسب الساعات الفارغة المتبقية من مواعيد العمل وخير العميل بينها بوضوح.
-        2. **جمع بيانات الحجز:** لتأكيد أي حجز، يجب أن تحصل من العميل على: (الاسم بالكامل، رقم الموبايل، الخدمة المطلوبة، اليوم، والساعة). لا تؤكد الحجز إلا بعد التأكد من أن اليوم والساعة غير موجودين في قائمة المواعيد المحجوزة.
-        3. **تسجيل الحجز برمجياً:** بمجرد اكتمال البيانات وتأكيدك للحجز مع العميل، أضف في نهاية ردك تماماً السطر التالي بصيغة JSON دقيقة (لن يظهر للعميل):
-        BOOKING_DATA: {{"name": "الاسم", "phone": "الموبايل", "service": "الخدمة", "day": "اليوم", "time": "الساعة"}}
+        1. **منع تضارب المواعيد بالتاريخ والساعة:** عند طلب حجز جديد، طابق التاريخ (`YYYY-MM-DD`) والساعة مع "سجل المواعيد المحجوزة حالياً". إذا كان محجوزاً في نفس التاريخ والساعة، اعتذر بلطف واقترح الساعات الفارغة في نفس اليوم.
+        2. **الحجز الجديد (CREATE):** اجمع (الاسم بالكامل، رقم الموبايل، الخدمة، اليوم، التاريخ YYYY-MM-DD، والساعة). عند التأكيد، أضف في نهاية ردك السطر التالي بالضبط:
+           ACTION_JSON: {{"action": "create", "name": "الاسم", "phone": "الموبايل", "service": "الخدمة", "day": "اليوم", "date": "YYYY-MM-DD", "time": "الساعة"}}
+        3. **تعديل موعد قائم (UPDATE):** إذا طلب العميل تغيير ميعاده، اطلب رقم موبايله وتأكد من وجود حجز له في السجل أعلاه، ثم اسأله عن اليوم والتاريخ والساعة الجديدة (وتأكد أنها غير محجوزة). عند تأكيد التعديل، أضف في نهاية ردك:
+           ACTION_JSON: {{"action": "update", "phone": "الموبايل", "day": "اليوم_الجديد", "date": "YYYY-MM-DD", "time": "الساعة_الجديدة"}}
+        4. **إلغاء موعد قائم (CANCEL):** إذا طلب العميل إلغاء حجزه، اطلب رقم موبايله وتأكد من وجود حجز له في السجل. عند تأكيد الإلغاء، أضف في نهاية ردك:
+           ACTION_JSON: {{"action": "cancel", "phone": "الموبايل"}}
         """
 
         with st.chat_message("assistant"):
-            with st.spinner("جاري فحص المواعيد والرد..."):
+            with st.spinner("جاري التنسيق مع جدول المواعيد..."):
                 reply_text = None
                 last_err = ""
                 
@@ -221,22 +273,42 @@ with tab_chat:
                     last_err = str(e)
 
                 if reply_text:
-                    booking_match = re.search(r"BOOKING_DATA:\s*(\{.*?\})", reply_text)
-                    if booking_match:
+                    action_match = re.search(r"ACTION_JSON:\s*(\{.*?\})", reply_text)
+                    if action_match:
                         try:
-                            info = json.loads(booking_match.group(1))
-                            add_booking_to_sheet(
-                                info.get("name", "غير محدد"),
-                                info.get("phone", "غير محدد"),
-                                info.get("service", "كشف"),
-                                info.get("day", "غير محدد"),
-                                info.get("time", "غير محدد")
-                            )
-                            st.toast("✅ تم تسجيل الميعاد في Google Sheets بنجاح!", icon="📅")
+                            act_data = json.loads(action_match.group(1))
+                            act_type = act_data.get("action")
+                            
+                            if act_type == "create":
+                                add_booking_to_sheet(
+                                    act_data.get("name", "غير محدد"),
+                                    act_data.get("phone", ""),
+                                    act_data.get("service", "كشف"),
+                                    act_data.get("day", ""),
+                                    act_data.get("date", ""),
+                                    act_data.get("time", "")
+                                )
+                                st.toast("✅ تم تسجيل الميعاد الجديد في Google Sheets!", icon="📅")
+                                
+                            elif act_type == "update":
+                                ok = update_booking_by_phone(
+                                    act_data.get("phone", ""),
+                                    act_data.get("day", ""),
+                                    act_data.get("date", ""),
+                                    act_data.get("time", "")
+                                )
+                                if ok:
+                                    st.toast("🔄 تم تعديل ميعادك في النظام وتحرير الميعاد القديم!", icon="✅")
+                                    
+                            elif act_type == "cancel":
+                                ok = delete_booking_by_phone(act_data.get("phone", ""))
+                                if ok:
+                                    st.toast("🗑️ تم إلغاء الحجز وتحرير الميعاد بنجاح!", icon="ℹ️")
+                                    
                         except Exception as sheet_err:
-                            st.error(f"تم الرد ولكن تعذر الحفظ في الشيت: {sheet_err}")
+                            st.error(f"حدث خطأ أثناء تحديث قاعدة البيانات: {sheet_err}")
                         
-                        reply_text = re.sub(r"BOOKING_DATA:\s*\{.*?\}", "", reply_text).strip()
+                        reply_text = re.sub(r"ACTION_JSON:\s*\{.*?\}", "", reply_text).strip()
 
                     st.markdown(reply_text)
                     st.session_state.messages.append({"role": "assistant", "content": reply_text})
@@ -244,28 +316,40 @@ with tab_chat:
                     st.error(f"تعذر الرد من الموديل. التفاصيل: {last_err}")
 
 # ------------------------------------------
-# TAB 2: لوحة تحكم الإدارة والمواعيد (CRM)
+# TAB 2: لوحة تحكم الإدارة والتحليلات الذكية
 # ------------------------------------------
 with tab_admin:
-    st.header("📊 لوحة تحكم الإدارة وسجل المواعيد (متصل بـ Google Sheets)")
+    st.header("📊 لوحة تحكم الإدارة والتحليلات (Live CRM)")
     admin_pass = st.text_input("أدخل كلمة مرور الإدارة:", type="password", placeholder="جرب: 1234")
     
     if admin_pass == ADMIN_PASSWORD:
-        if st.button("🔄 تحديث البيانات من Google Sheets"):
+        if st.button("🔄 تحديث البيانات الآن"):
             st.rerun()
 
         df_bookings = fetch_all_bookings()
         
-        # إحصائيات سريعة
         m1, m2, m3 = st.columns(3)
-        m1.metric("إجمالي الحجوزات المسجلة", len(df_bookings))
-        m2.metric("حالة الربط السحابي", "متصل لايف 🟢")
-        m3.metric("اسم الشيت", SHEET_NAME)
+        m1.metric("إجمالي الحجوزات النشطة", len(df_bookings))
+        m2.metric("تاريخ اليوم", datetime.now().strftime("%Y-%m-%d"))
+        m3.metric("حالة قاعدة البيانات", "متصل لايف 🟢")
         
         st.divider()
         
         if not df_bookings.empty:
-            st.subheader("📋 جدول المواعيد المحجوزة")
+            # قسم التحليلات والرسوم البيانية
+            st.subheader("📈 تحليلات الأداء والخدمات")
+            c1, c2 = st.columns(2)
+            with c1:
+                if "الخدمة" in df_bookings.columns:
+                    st.markdown("**توزيع الحجوزات حسب الخدمة:**")
+                    st.bar_chart(df_bookings["الخدمة"].value_counts())
+            with c2:
+                if "اليوم" in df_bookings.columns:
+                    st.markdown("**أكثر أيام الأسبوع طلباً:**")
+                    st.bar_chart(df_bookings["اليوم"].value_counts())
+
+            st.divider()
+            st.subheader("📋 جدول المواعيد المؤكدة")
             st.dataframe(df_bookings, use_container_width=True)
             
             col_dl, col_del = st.columns([1, 2])
@@ -279,15 +363,15 @@ with tab_admin:
                 )
             with col_del:
                 row_to_del = st.selectbox(
-                    "إلغاء / حذف حجز (اختر رقم الصف):",
+                    "حذف حجز يدوياً (اختر الصف):",
                     options=df_bookings.index,
-                    format_func=lambda x: f"صف {x}: {df_bookings.loc[x, 'اسم العميل']} - {df_bookings.loc[x, 'اليوم']} ({df_bookings.loc[x, 'الساعة']})"
+                    format_func=lambda x: f"صف {x}: {df_bookings.loc[x, 'اسم العميل']} - {df_bookings.loc[x, 'التاريخ']} ({df_bookings.loc[x, 'الساعة']})"
                 )
-                if st.button("🗑️ حذف الميعاد المحدد من الشيت"):
+                if st.button("🗑️ حذف الميعاد المحدد"):
                     delete_booking_row(row_to_del)
-                    st.success("تم حذف الميعاد، وأصبح متاحاً للحجز مرة أخرى!")
+                    st.success("تم حذف الميعاد بنجاح!")
                     st.rerun()
         else:
-            st.info("لا توجد حجوزات مسجلة في الشيت حتى الآن. جرب عمل حجز من تبويب المحادثة!")
+            st.info("لا توجد حجوزات مسجلة حالياً.")
     elif admin_pass:
         st.error("كلمة المرور غير صحيحة!")
