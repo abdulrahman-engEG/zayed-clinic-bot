@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import json
 import re
+import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -47,13 +49,32 @@ try:
         "refresh_token": st.secrets["GOOGLE_REFRESH_TOKEN"].strip(),
         "token_uri": "https://oauth2.googleapis.com/token",
     }
+    tg_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "").strip()
+    tg_chat_id = str(st.secrets.get("TELEGRAM_CHAT_ID", "")).strip()
 except Exception as e:
     st.error(f"برجاء التأكد من إضافة جميع المفاتيح في إعدادات Secrets. التفاصيل: {e}")
     st.stop()
 
 # ==========================================
-# 2. دوال التاريخ والاتصال بـ Google Sheets (CRUD)
+# 2. دوال الإشعارات الفورية والتاريخ و Google Sheets
 # ==========================================
+def send_telegram_alert(message_text):
+    """إرسال إشعار فوري للإدارة عبر Telegram Bot API بدون مكتبات خارجية"""
+    if not tg_token or not tg_chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        payload = urllib.parse.urlencode({
+            "chat_id": tg_chat_id,
+            "text": message_text,
+            "parse_mode": "HTML"
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=payload)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
 ARABIC_DAYS = {
     "Monday": "الإثنين", "Tuesday": "الثلاثاء", "Wednesday": "الأربعاء",
     "Thursday": "الخميس", "Friday": "الجمعة", "Saturday": "السبت", "Sunday": "الأحد"
@@ -99,6 +120,17 @@ def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
     ensure_headers(ws)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     ws.append_row([now_str, name, str(phone), service, day, date_str, time_slot])
+    
+    # إرسال إشعار فوري للإدارة
+    alert_msg = (
+        f"🔔 <b>حجز جديد - {CLINIC_NAME}</b>\n\n"
+        f"👤 <b>العميل:</b> {name}\n"
+        f"📱 <b>الموبايل:</b> <code>{phone}</code>\n"
+        f"🩺 <b>الخدمة:</b> {service}\n"
+        f"📅 <b>الموعد:</b> {day} ({date_str})\n"
+        f"⏰ <b>الساعة:</b> {time_slot}"
+    )
+    send_telegram_alert(alert_msg)
 
 def delete_booking_by_phone(phone):
     ws = get_gsheet()
@@ -106,12 +138,22 @@ def delete_booking_by_phone(phone):
     records = ws.get_all_records()
     clean_target = re.sub(r"\D", "", str(phone))
     deleted = False
+    client_name = ""
     for idx in range(len(records) - 1, -1, -1):
         row_phone = re.sub(r"\D", "", str(records[idx].get("رقم الموبايل", "")))
         if clean_target and clean_target in row_phone:
+            client_name = records[idx].get("اسم العميل", "عميل")
             ws.delete_rows(idx + 2)
             deleted = True
             break
+    if deleted:
+        alert_msg = (
+            f"❌ <b>إلغاء حجز - {CLINIC_NAME}</b>\n\n"
+            f"👤 <b>العميل:</b> {client_name}\n"
+            f"📱 <b>الموبايل:</b> <code>{phone}</code>\n"
+            f"ℹ️ تم تحرير الموعد في الجدول تلقائياً."
+        )
+        send_telegram_alert(alert_msg)
     return deleted
 
 def update_booking_by_phone(phone, new_day, new_date, new_time):
@@ -120,15 +162,25 @@ def update_booking_by_phone(phone, new_day, new_date, new_time):
     records = ws.get_all_records()
     clean_target = re.sub(r"\D", "", str(phone))
     updated = False
+    client_name = ""
     for idx in range(len(records) - 1, -1, -1):
         row_phone = re.sub(r"\D", "", str(records[idx].get("رقم الموبايل", "")))
         if clean_target and clean_target in row_phone:
+            client_name = records[idx].get("اسم العميل", "عميل")
             row_num = idx + 2
             ws.update_cell(row_num, 5, new_day)
             ws.update_cell(row_num, 6, new_date)
             ws.update_cell(row_num, 7, new_time)
             updated = True
             break
+    if updated:
+        alert_msg = (
+            f"🔄 <b>تعديل موعد حجز - {CLINIC_NAME}</b>\n\n"
+            f"👤 <b>العميل:</b> {client_name}\n"
+            f"📱 <b>الموبايل:</b> <code>{phone}</code>\n"
+            f"📅 <b>الموعد الجديد:</b> {new_day} ({new_date}) الساعة {new_time}"
+        )
+        send_telegram_alert(alert_msg)
     return updated
 
 def delete_booking_row(row_index_in_df):
@@ -293,7 +345,7 @@ with tab_chat:
                                     act_data.get("date", ""),
                                     act_data.get("time", "")
                                 )
-                                st.toast("✅ تم تسجيل الميعاد الجديد في Google Sheets!", icon="📅")
+                                st.toast("✅ تم تسجيل الميعاد وإرسال إشعار للإدارة!", icon="📅")
                                 
                             elif act_type == "update":
                                 ok = update_booking_by_phone(
@@ -303,12 +355,12 @@ with tab_chat:
                                     act_data.get("time", "")
                                 )
                                 if ok:
-                                    st.toast("🔄 تم تعديل ميعادك في النظام وتحرير الميعاد القديم!", icon="✅")
+                                    st.toast("🔄 تم تعديل ميعادك وإبلاغ الإدارة!", icon="✅")
                                     
                             elif act_type == "cancel":
                                 ok = delete_booking_by_phone(act_data.get("phone", ""))
                                 if ok:
-                                    st.toast("🗑️ تم إلغاء الحجز وتحرير الميعاد بنجاح!", icon="ℹ️")
+                                    st.toast("🗑️ تم إلغاء الحجز وإبلاغ الإدارة!", icon="ℹ️")
                                     
                         except Exception as sheet_err:
                             st.error(f"حدث خطأ أثناء تحديث قاعدة البيانات: {sheet_err}")
@@ -328,15 +380,23 @@ with tab_admin:
     admin_pass = st.text_input("أدخل كلمة مرور الإدارة:", type="password", placeholder="جرب: 1234")
     
     if admin_pass == ADMIN_PASSWORD:
-        if st.button("🔄 تحديث البيانات الآن"):
-            st.rerun()
+        c_btn1, c_btn2 = st.columns([1, 1])
+        with c_btn1:
+            if st.button("🔄 تحديث البيانات الآن"):
+                st.rerun()
+        with c_btn2:
+            if st.button("🔔 إرسال إشعار تجريبي لتيليجرام"):
+                if send_telegram_alert(f"✅ تجربة اتصال ناجحة من نظام {CLINIC_NAME}!"):
+                    st.success("تم إرسال الإشعار التجريبي على تيليجرام بنجاح!")
+                else:
+                    st.warning("تأكد من إضافة TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID في Secrets.")
 
         df_bookings = fetch_all_bookings()
         
         m1, m2, m3 = st.columns(3)
         m1.metric("إجمالي الحجوزات النشطة", len(df_bookings))
         m2.metric("تاريخ اليوم", datetime.now().strftime("%Y-%m-%d"))
-        m3.metric("حالة قاعدة البيانات", "متصل لايف 🟢")
+        m3.metric("حالة الإشعارات الفورية", "مفعّلة 🟢" if (tg_token and tg_chat_id) else "غير مفعّلة ⚪")
         
         st.divider()
         
