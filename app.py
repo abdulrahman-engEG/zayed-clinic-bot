@@ -73,35 +73,42 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
 
     with st.chat_message("assistant"):
         with st.spinner("بيكتب..."):
-            client = genai.Client(api_key=api_key)
-            
-            # تجربة أشهر الموديلات المجانية المتاحة بالترتيب
-            candidate_models = [
-                "gemini-2.5-flash",
-                "gemini-2.0-flash",
-                "gemini-2.0-flash-lite",
-                "gemini-1.5-flash",
-                "gemini-1.5-pro",
-            ]
+            client = genai.Client(
+                api_key=api_key,
+                http_options={'api_version': 'v1beta'}
+            )
             
             reply_text = None
             last_error = ""
             
-            for model_name in candidate_models:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(temperature=0.2),
-                    )
-                    reply_text = response.text
-                    break
-                except Exception as e:
-                    last_error = str(e)
-                    continue
+            try:
+                available_models = [
+                    m.name.replace("models/", "")
+                    for m in client.models.list()
+                    if "generateContent" in (m.supported_actions or [])
+                    and "gemini" in m.name.lower()
+                ]
+                
+                flash_models = [m for m in available_models if "flash" in m.lower()]
+                models_to_try = flash_models if flash_models else available_models
+
+                for model_name in models_to_try:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(temperature=0.2),
+                        )
+                        reply_text = response.text
+                        break
+                    except Exception as e:
+                        last_error = f"({model_name}): {str(e)}"
+                        continue
+            except Exception as list_err:
+                last_error = f"ListModels Error: {str(list_err)}"
             
             if reply_text:
                 st.markdown(reply_text)
                 st.session_state.messages.append({"role": "assistant", "content": reply_text})
             else:
-                st.error(f"تعذر الاتصال بموديلات Gemini. تفاصيل الخطأ: {last_error}")
+                st.error(f"تعذر الاتصال. التفاصيل: {last_error}")
