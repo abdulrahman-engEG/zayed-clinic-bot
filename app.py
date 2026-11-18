@@ -74,7 +74,7 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
     with st.chat_message("assistant"):
         with st.spinner("بيكتب..."):
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 google_api_key=api_key,
                 temperature=0.2
             )
