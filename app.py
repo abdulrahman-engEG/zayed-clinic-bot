@@ -156,6 +156,17 @@ def fetch_all_bookings():
 def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
     ws = get_gsheet()
     ensure_headers(ws)
+    
+    # فحص منع التكرار: التأكد أن الموعد غير مسجل مسبقاً لنفس العميل
+    records = ws.get_all_records()
+    clean_phone = re.sub(r"\D", "", str(phone))
+    for row in records:
+        row_phone = re.sub(r"\D", "", str(row.get("رقم الموبايل", "")))
+        if (str(row.get("التاريخ", "")).strip() == str(date_str).strip() and 
+            str(row.get("الساعة", "")).strip() == str(time_slot).strip() and 
+            clean_phone and clean_phone in row_phone):
+            return False  # الحجز مسجل بالفعل، لا تكرره
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     ws.append_row([now_str, name, str(phone), service, day, date_str, time_slot])
     
@@ -169,6 +180,7 @@ def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
         f"⏰ <b>الساعة:</b> {time_slot}"
     )
     send_telegram_alert(alert_msg)
+    return True
 
 def delete_booking_by_phone(phone):
     ws = get_gsheet()
@@ -325,11 +337,11 @@ with tab_chat:
 
         === قواعد العمل الصارمة ===
         1. **منع تضارب المواعيد بالتاريخ والساعة:** عند طلب حجز جديد، طابق التاريخ (`YYYY-MM-DD`) والساعة مع "سجل المواعيد المحجوزة حالياً". إذا كان محجوزاً في نفس التاريخ والساعة، اعتذر بلطف واقترح الساعات الفارغة في نفس اليوم.
-        2. **الحجز الجديد (CREATE):** اجمع (الاسم بالكامل، رقم الموبايل، الخدمة، اليوم، التاريخ YYYY-MM-DD، والساعة). عند التأكيد، أضف في نهاية ردك السطر التالي بالضبط:
+        2. **الحجز الجديد (CREATE):** اجمع (الاسم بالكامل، رقم الموبايل، الخدمة، اليوم، التاريخ YYYY-MM-DD، والساعة). إذا كانت البيانات مكتملة والموعد متاح، اعرض ملخص الحجز والتكلفة واسأل العميل للتأكيد النهائي **بدون كتابة ACTION_JSON في هذه الرسالة إطلاقاً**. فقط بعد أن يرد العميل بالموافقة (مثل: نعم، أكد، تمام)، أرسل رسالة التأكيد النهائية وأضف في نهايتها السطر التالي مرة واحدة فقط:
            ACTION_JSON: {{"action": "create", "name": "الاسم", "phone": "الموبايل", "service": "الخدمة", "day": "اليوم", "date": "YYYY-MM-DD", "time": "الساعة"}}
-        3. **تعديل موعد قائم (UPDATE):** إذا طلب العميل تغيير ميعاده، اطلب رقم موبايله وتأكد من وجود حجز له في السجل أعلاه، ثم اسأله عن اليوم والتاريخ والساعة الجديدة (وتأكد أنها غير محجوزة). عند تأكيد التعديل، أضف في نهاية ردك:
+        3. **تعديل موعد قائم (UPDATE):** إذا طلب العميل تغيير ميعاده، اطلب رقم موبايله وتأكد من وجود حجز له في السجل أعلاه، ثم اسأله عن اليوم والتاريخ والساعة الجديدة (وتأكد أنها غير محجوزة). عند تأكيد التعديل النهائي، أضف في نهاية ردك:
            ACTION_JSON: {{"action": "update", "phone": "الموبايل", "day": "اليوم_الجديد", "date": "YYYY-MM-DD", "time": "الساعة_الجديدة"}}
-        4. **إلغاء موعد قائم (CANCEL):** إذا طلب العميل إلغاء حجزه، اطلب رقم موبايله وتأكد من وجود حجز له في السجل. عند تأكيد الإلغاء، أضف في نهاية ردك:
+        4. **إلغاء موعد قائم (CANCEL):** إذا طلب العميل إلغاء حجزه، اطلب رقم موبايله وتأكد من وجود حجز له في السجل. عند تأكيد الإلغاء النهائي، أضف في نهاية ردك:
            ACTION_JSON: {{"action": "cancel", "phone": "الموبايل"}}
         """
 
@@ -383,8 +395,9 @@ with tab_chat:
                                 c_date = act_data.get("date", "")
                                 c_time = act_data.get("time", "")
 
-                                add_booking_to_sheet(c_name, c_phone, c_service, c_day, c_date, c_time)
-                                st.toast("✅ تم تسجيل الميعاد وإرسال إشعار للإدارة!", icon="📅")
+                                is_new = add_booking_to_sheet(c_name, c_phone, c_service, c_day, c_date, c_time)
+                                if is_new:
+                                    st.toast("✅ تم تسجيل الميعاد وإرسال إشعار للإدارة!", icon="📅")
 
                                 ticket_msg = (
                                     f"🎫 *تذكرة حجز مؤكدة - {CLINIC_NAME}*\n"
