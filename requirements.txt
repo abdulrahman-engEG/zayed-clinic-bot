@@ -8,3 +8,5 @@ sentence-transformers
 pypdf
 faiss-cpu
 pandas
+gspread
+google-auth
