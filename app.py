@@ -19,6 +19,7 @@ import gspread
 # ==========================================
 CLINIC_NAME = "عيادة زايد سمايل للأسنان"
 CLINIC_ICON = "🦷"
+CLINIC_ADDRESS = "أركان بلازا، المبنى 4، الدور الثاني، الشيخ زايد"
 WHATSAPP_NUMBER = "201001234567"
 PDF_FILE_NAME = "clinic_data.pdf"
 SHEET_NAME = "Clinic_Bookings"
@@ -36,6 +37,19 @@ st.markdown("""
         display: inline-block; background-color: #25D366; color: white !important;
         padding: 10px 20px; border-radius: 25px; text-decoration: none;
         font-weight: bold; text-align: center; width: 100%; margin-top: 10px;
+    }
+    .ticket-container {
+        display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px;
+    }
+    .ticket-btn-client {
+        display: inline-block; background-color: #25D366; color: white !important;
+        padding: 10px 18px; border-radius: 20px; text-decoration: none;
+        font-weight: bold; font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.12);
+    }
+    .ticket-btn-clinic {
+        display: inline-block; background-color: #128C7E; color: white !important;
+        padding: 10px 18px; border-radius: 20px; text-decoration: none;
+        font-weight: bold; font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.12);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -56,8 +70,32 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. دوال الإشعارات الفورية والتاريخ و Google Sheets
+# 2. دوال تذاكر الواتساب والإشعارات و Google Sheets
 # ==========================================
+def format_egypt_phone(raw_phone):
+    """تحويل رقم الموبايل المصري لصيغة واتساب الدولية (201xxxxxxxxx)"""
+    digits = re.sub(r"\D", "", str(raw_phone))
+    if digits.startswith("01") and len(digits) == 11:
+        return "2" + digits
+    elif digits.startswith("1") and len(digits) == 10:
+        return "20" + digits
+    elif digits.startswith("0020"):
+        return digits[2:]
+    return digits
+
+def build_ticket_buttons(client_phone, ticket_message):
+    """إنشاء زرارين: حفظ التذكرة للعميل + إرسالها لواتساب العيادة"""
+    encoded_msg = urllib.parse.quote(ticket_message)
+    clean_client_wa = format_egypt_phone(client_phone)
+    
+    client_btn = ""
+    if clean_client_wa:
+        client_btn = f'<a href="https://wa.me/{clean_client_wa}?text={encoded_msg}" target="_blank" class="ticket-btn-client">📲 احفظ التذكرة على واتسابك</a>'
+    
+    clinic_btn = f'<a href="https://wa.me/{WHATSAPP_NUMBER}?text={encoded_msg}" target="_blank" class="ticket-btn-clinic">📤 أرسل التذكرة لواتساب العيادة</a>'
+    
+    return f'\n\n<div class="ticket-container">{client_btn}{clinic_btn}</div>'
+
 def send_telegram_alert(message_text):
     """إرسال إشعار فوري للإدارة عبر Telegram Bot API بدون مكتبات خارجية"""
     if not tg_token or not tg_chat_id:
@@ -213,7 +251,7 @@ with st.spinner("جاري تحميل النظام الذكي وربط قاعدة
 tab_chat, tab_admin = st.tabs(["💬 مساعد العملاء والحجز الذكي", "📊 لوحة تحكم الإدارة والتحليلات"])
 
 # ------------------------------------------
-# TAB 1: محادثة العملاء (حجز / تعديل / إلغاء / منع تضارب)
+# TAB 1: محادثة العملاء (حجز / تعديل / إلغاء / تذاكر واتساب)
 # ------------------------------------------
 with tab_chat:
     col_header, col_wa = st.columns([3, 1])
@@ -238,7 +276,7 @@ with tab_chat:
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(message["content"], unsafe_allow_html=True)
 
     typed_question = st.chat_input("اكتب رسالتك هنا (حجز، استفسار، تعديل أو إلغاء)...")
     user_question = quick_question if quick_question else typed_question
@@ -330,6 +368,7 @@ with tab_chat:
                     last_err = str(e)
 
                 if reply_text:
+                    ticket_html = ""
                     action_match = re.search(r"ACTION_JSON:\s*(\{.*?\})", reply_text)
                     if action_match:
                         try:
@@ -337,25 +376,43 @@ with tab_chat:
                             act_type = act_data.get("action")
                             
                             if act_type == "create":
-                                add_booking_to_sheet(
-                                    act_data.get("name", "غير محدد"),
-                                    act_data.get("phone", ""),
-                                    act_data.get("service", "كشف"),
-                                    act_data.get("day", ""),
-                                    act_data.get("date", ""),
-                                    act_data.get("time", "")
-                                )
+                                c_name = act_data.get("name", "غير محدد")
+                                c_phone = act_data.get("phone", "")
+                                c_service = act_data.get("service", "كشف")
+                                c_day = act_data.get("day", "")
+                                c_date = act_data.get("date", "")
+                                c_time = act_data.get("time", "")
+
+                                add_booking_to_sheet(c_name, c_phone, c_service, c_day, c_date, c_time)
                                 st.toast("✅ تم تسجيل الميعاد وإرسال إشعار للإدارة!", icon="📅")
+
+                                ticket_msg = (
+                                    f"🎫 *تذكرة حجز مؤكدة - {CLINIC_NAME}*\n"
+                                    f"👤 الاسم: {c_name}\n"
+                                    f"🩺 الخدمة: {c_service}\n"
+                                    f"📅 الموعد: {c_day} ({c_date})\n"
+                                    f"⏰ الساعة: {c_time}\n"
+                                    f"📍 العنوان: {CLINIC_ADDRESS}"
+                                )
+                                ticket_html = build_ticket_buttons(c_phone, ticket_msg)
                                 
                             elif act_type == "update":
-                                ok = update_booking_by_phone(
-                                    act_data.get("phone", ""),
-                                    act_data.get("day", ""),
-                                    act_data.get("date", ""),
-                                    act_data.get("time", "")
-                                )
+                                u_phone = act_data.get("phone", "")
+                                u_day = act_data.get("day", "")
+                                u_date = act_data.get("date", "")
+                                u_time = act_data.get("time", "")
+
+                                ok = update_booking_by_phone(u_phone, u_day, u_date, u_time)
                                 if ok:
                                     st.toast("🔄 تم تعديل ميعادك وإبلاغ الإدارة!", icon="✅")
+                                    ticket_msg = (
+                                        f"🔄 *تذكرة تعديل موعد - {CLINIC_NAME}*\n"
+                                        f"📱 رقم الموبايل: {u_phone}\n"
+                                        f"📅 الموعد الجديد: {u_day} ({u_date})\n"
+                                        f"⏰ الساعة: {u_time}\n"
+                                        f"📍 العنوان: {CLINIC_ADDRESS}"
+                                    )
+                                    ticket_html = build_ticket_buttons(u_phone, ticket_msg)
                                     
                             elif act_type == "cancel":
                                 ok = delete_booking_by_phone(act_data.get("phone", ""))
@@ -365,9 +422,9 @@ with tab_chat:
                         except Exception as sheet_err:
                             st.error(f"حدث خطأ أثناء تحديث قاعدة البيانات: {sheet_err}")
                         
-                        reply_text = re.sub(r"ACTION_JSON:\s*\{.*?\}", "", reply_text).strip()
+                        reply_text = re.sub(r"ACTION_JSON:\s*\{.*?\}", "", reply_text).strip() + ticket_html
 
-                    st.markdown(reply_text)
+                    st.markdown(reply_text, unsafe_allow_html=True)
                     st.session_state.messages.append({"role": "assistant", "content": reply_text})
                 else:
                     st.error(f"تعذر الرد من الموديل. التفاصيل: {last_err}")
