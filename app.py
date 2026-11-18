@@ -1,10 +1,10 @@
 import streamlit as st
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-import google.genai as genai
+from google import genai
+from google.genai import types
 
 # إعداد واجهة الصفحة بشكل احترافي للعميل
 st.set_page_config(page_title="مساعد عيادة زايد سمايل الذكي", page_icon="🦷")
@@ -13,7 +13,7 @@ st.caption("أهلاً بك! اسألني عن الأسعار، مواعيد ا�
 
 # قراءة مفتاح الـ API من الأسرار المحفوظة في السيرفر
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
+    api_key = st.secrets["GEMINI_API_KEY"].strip()
 except Exception:
     st.error("عذراً، لم يتم ضبط مفتاح التشغيل (GEMINI_API_KEY) في إعدادات الاستضافة.")
     st.stop()
@@ -74,19 +74,34 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
     with st.chat_message("assistant"):
         with st.spinner("بيكتب..."):
             client = genai.Client(api_key=api_key)
-            available_models = [
-                m.name.replace("models/", "")
-                for m in client.models.list()
-                if "generateContent" in (m.supported_actions or [])
-                and "flash" in m.name.lower()
+            
+            # تجربة أشهر الموديلات المجانية المتاحة بالترتيب
+            candidate_models = [
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-lite",
+                "gemini-1.5-flash",
+                "gemini-1.5-pro",
             ]
-            chosen_model = available_models[0] if available_models else "gemini-flash-latest"
-
-            llm = ChatGoogleGenerativeAI(
-                model=chosen_model,
-                google_api_key=api_key,
-                temperature=0.2
-            )
-            response = llm.invoke(prompt)
-            st.markdown(response.content)
-            st.session_state.messages.append({"role": "assistant", "content": response.content})
+            
+            reply_text = None
+            last_error = ""
+            
+            for model_name in candidate_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(temperature=0.2),
+                    )
+                    reply_text = response.text
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+            
+            if reply_text:
+                st.markdown(reply_text)
+                st.session_state.messages.append({"role": "assistant", "content": reply_text})
+            else:
+                st.error(f"تعذر الاتصال بموديلات Gemini. تفاصيل الخطأ: {last_error}")
