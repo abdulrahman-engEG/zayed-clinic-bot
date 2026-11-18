@@ -23,6 +23,7 @@ SHEET_NAME = "Clinic_Bookings"
 ADMIN_PASSWORD = "1234"
 
 CLINIC_WORKING_HOURS = "من السبت إلى الخميس، من الساعة 1 ظهراً حتى 10 مساءً (مدة الجلسة ساعة واحدة: 1م، 2م، 3م، 4م، 5م، 6م، 7م، 8م، 9م). الجمعة إجازة رسمية."
+EXPECTED_HEADERS = ["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"]
 
 st.set_page_config(page_title=f"نظام إدارة وحجز - {CLINIC_NAME}", page_icon=CLINIC_ICON, layout="wide")
 
@@ -76,32 +77,35 @@ def get_gsheet():
     )
     gc = gspread.authorize(creds)
     sh = gc.open(SHEET_NAME)
-    worksheet = sh.sheet1
-    expected_headers = ["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"]
-    if not worksheet.row_values(1):
-        worksheet.append_row(expected_headers)
-    return worksheet
+    return sh.sheet1
+
+def ensure_headers(ws):
+    first_row = ws.row_values(1)
+    if not first_row:
+        ws.append_row(EXPECTED_HEADERS)
 
 def fetch_all_bookings():
     try:
         ws = get_gsheet()
+        ensure_headers(ws)
         records = ws.get_all_records()
         return pd.DataFrame(records)
     except Exception as e:
         st.warning(f"تعذر قراءة Google Sheet حالياً: {e}")
-        return pd.DataFrame(columns=["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"])
+        return pd.DataFrame(columns=EXPECTED_HEADERS)
 
 def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
     ws = get_gsheet()
+    ensure_headers(ws)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     ws.append_row([now_str, name, str(phone), service, day, date_str, time_slot])
 
 def delete_booking_by_phone(phone):
     ws = get_gsheet()
+    ensure_headers(ws)
     records = ws.get_all_records()
     clean_target = re.sub(r"\D", "", str(phone))
     deleted = False
-    # البحث من الأسفل للأعلى لتجنب تغير أرقام الصفوف عند الحذف
     for idx in range(len(records) - 1, -1, -1):
         row_phone = re.sub(r"\D", "", str(records[idx].get("رقم الموبايل", "")))
         if clean_target and clean_target in row_phone:
@@ -112,6 +116,7 @@ def delete_booking_by_phone(phone):
 
 def update_booking_by_phone(phone, new_day, new_date, new_time):
     ws = get_gsheet()
+    ensure_headers(ws)
     records = ws.get_all_records()
     clean_target = re.sub(r"\D", "", str(phone))
     updated = False
@@ -336,7 +341,6 @@ with tab_admin:
         st.divider()
         
         if not df_bookings.empty:
-            # قسم التحليلات والرسوم البيانية
             st.subheader("📈 تحليلات الأداء والخدمات")
             c1, c2 = st.columns(2)
             with c1:
