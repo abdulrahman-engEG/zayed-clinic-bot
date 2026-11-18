@@ -4,13 +4,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+import google.genai as genai
 
 # إعداد واجهة الصفحة بشكل احترافي للعميل
 st.set_page_config(page_title="مساعد عيادة زايد سمايل الذكي", page_icon="🦷")
 st.title("🦷 المساعد الذكي - عيادة زايد سمايل")
 st.caption("أهلاً بك! اسألني عن الأسعار، مواعيد العمل، طرق التقسيط، أو خدمات العيادة.")
 
-# قراءة مفتاح الـ API من الأسرار المحفوظة في السيرفر (آمن ومخفي تماماً)
+# قراءة مفتاح الـ API من الأسرار المحفوظة في السيرفر
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except Exception:
@@ -33,7 +34,6 @@ def load_knowledge_base():
     )
     chunks = text_splitter.split_text(raw_text)
     
-    # استخدام Embedding محلي سريع ومستقر بدون مشاكل API
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vector_store = FAISS.from_texts(chunks, embedding=embeddings)
     return vector_store
@@ -71,11 +71,8 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
     {user_question}
     """
 
-  with st.chat_message("assistant"):
+    with st.chat_message("assistant"):
         with st.spinner("بيكتب..."):
-            import google.genai as genai
-            
-            # اكتشاف أول موديل متاح ومفعل تلقائياً على مفتاح الـ API بتاعك
             client = genai.Client(api_key=api_key)
             available_models = [
                 m.name.replace("models/", "")
@@ -83,7 +80,6 @@ if user_question := st.chat_input("اكتب سؤالك هنا (مثال: بكا�
                 if "generateContent" in (m.supported_actions or [])
                 and "flash" in m.name.lower()
             ]
-            # اختيار أول موديل Flash متاح (أو أي موديل نصي متاح كبديل)
             chosen_model = available_models[0] if available_models else "gemini-flash-latest"
 
             llm = ChatGoogleGenerativeAI(
