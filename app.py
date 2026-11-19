@@ -118,14 +118,12 @@ def send_telegram_alert(message_text):
 
 @st.cache_resource
 def load_clinic_pdf_text():
-    """قراءة نص الـ PDF مرة واحدة فقط وتخزينه في الذاكرة لسرعة فائقة"""
     pdf_reader = PdfReader(PDF_FILE_NAME)
     pages_text = [page.extract_text() for page in pdf_reader.pages if page.extract_text()]
     return "\n".join(pages_text)
 
 @st.cache_resource
 def get_gemini_client_and_models():
-    """تحديد وترتيب أسرع موديلات Flash المتاحة مرة واحدة فقط"""
     client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
     preferred_order = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
     try:
@@ -156,7 +154,7 @@ def ensure_headers(ws):
     if not ws.row_values(1):
         ws.append_row(EXPECTED_HEADERS)
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=20)
 def fetch_all_bookings():
     try:
         ws = get_gsheet()
@@ -173,6 +171,7 @@ ARABIC_DAYS = {
 }
 
 def build_smart_availability_context(df_bookings):
+    """حساب الساعات المتاحة والمحجوزة بالبايثون للأيام الـ 7 القادمة لسرعة فائقة"""
     now = get_cairo_now()
     current_time_str = now.strftime("%I:%M %p").replace("AM", "صباحاً").replace("PM", "مساءً")
     today_str = now.strftime("%Y-%m-%d")
@@ -187,10 +186,10 @@ def build_smart_availability_context(df_bookings):
 
     lines = [
         f"الوقت الحالي الآن: {ARABIC_DAYS[now.strftime('%A')]} {today_str} الساعة {current_time_str}",
-        "خريطة المواعيد المتاحة والمحجوزة للأيام الـ 14 القادمة:"
+        "المواعيد المتاحة للأيام الـ 7 القادمة:"
     ]
 
-    for i in range(14):
+    for i in range(7):
         d = now + timedelta(days=i)
         eng_day = d.strftime("%A")
         day_ar = ARABIC_DAYS[eng_day]
@@ -210,9 +209,8 @@ def build_smart_availability_context(df_bookings):
             if not is_taken:
                 available_slots.append(slot_label)
 
-        avail_text = "، ".join(available_slots) if available_slots else "مكتمل بالكامل"
-        booked_text = "، ".join(day_booked) if day_booked else "لا يوجد"
-        lines.append(f"- {day_ar} {d_str}{label} | المتاح: [{avail_text}] | المحجوز: [{booked_text}]")
+        avail_text = "، ".join(available_slots) if available_slots else "مكتمل"
+        lines.append(f"- {day_ar} {d_str}{label} | المتاح: [{avail_text}]")
 
     return "\n".join(lines)
 
@@ -355,11 +353,11 @@ with tab_chat:
         else:
             client_records_text = "لا توجد حجوزات مسجلة حالياً."
 
-        recent_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-8:]])
+        recent_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-6:]])
 
         prompt = f"""
         أنت موظف استقبال ومنسق مواعيد ذكي جداً ولبق في {CLINIC_NAME}.
-        تحدث بالعامية المصرية المهذبة والودودة.
+        تحدث بالعامية المصرية المهذبة والودودة وبإيجاز ووضوح.
 
         === خريطة المواعيد المحسوبة بدقة ===
         {availability_context}
@@ -386,63 +384,62 @@ with tab_chat:
            - التزم تماماً بقائمة [المتاح] في "خريطة المواعيد المحسوبة بدقة". إذا طلب العميل يوماً مغلقاً أو ساعة غير موجودة في [المتاح]، اعتذر بلطف واعرض عليه أول 3 ساعات متاحة من القائمة.
         3. **فهم الأعراض وترشيح الخدمة:** إذا وصف العميل ألماً أو شكوى دون تسمية الخدمة، رشح له الخدمة المناسبة وسعرها من بيانات العيادة واعرض عليه الحجز.
         4. **التأكيد على مرحلتين وتنسيق الملخص:**
-           - عند اكتمال بيانات الحجز الجديد، اعرض ملخص الحجز منسقاً في **نقاط رأسية واضحة** (كل معلومة في سطر منفصل: الاسم، الموبايل، الخدمة والتكلفة، اليوم والتاريخ، الساعة) ثم اسأل العميل للتأكيد النهائي واجعل `"action_type": "none"`.
-           - فقط بعد موافقة العميل الصريحة (مثل: نعم، أكد، تمام)، اجعل `"action_type": "create"` واملأ الحقول.
-           - ونفس الشيء للتعديل (`"update"`) والإلغاء (`"cancel"`): لا تنفذ الإجراء إلا بعد التحقق من رقم موبايل العميل في السجل وتأكيده.
-
-        === صيغة المخرجات الإلزامية (JSON فقط) ===
-        {{
-          "reply": "ردك الطبيعي والودود للعميل بالعامية المصرية",
-          "action_type": "none أو create أو update أو cancel",
-          "name": "اسم العميل الكامل أو فارغ",
-          "phone": "رقم الموبايل أو فارغ",
-          "service": "اسم الخدمة أو فارغ",
-          "day": "اليوم بالعربية (مثل الخميس) أو فارغ",
-          "date": "التاريخ بصيغة YYYY-MM-DD أو فارغ",
-          "time": "الساعة بصيغة مثل 2م أو فارغ"
-        }}
+           - عند اكتمال بيانات الحجز الجديد، اعرض ملخص الحجز منسقاً في **نقاط رأسية واضحة** (الاسم، الموبايل، الخدمة والتكلفة، اليوم والتاريخ، الساعة) ثم اسأل العميل للتأكيد النهائي **بدون كتابة ACTION_JSON في هذه الرسالة إطلاقاً**.
+           - فقط بعد موافقة العميل الصريحة (مثل: نعم، أكد، تمام)، أرسل رسالة التأكيد النهائية وأضف في نهايتها السطر التالي مرة واحدة فقط:
+             ACTION_JSON: {{"action": "create", "name": "الاسم", "phone": "الموبايل", "service": "الخدمة", "day": "اليوم", "date": "YYYY-MM-DD", "time": "الساعة"}}
+           - عند تأكيد التعديل النهائي أضف في نهاية ردك:
+             ACTION_JSON: {{"action": "update", "phone": "الموبايل", "day": "اليوم_الجديد", "date": "YYYY-MM-DD", "time": "الساعة_الجديدة"}}
+           - عند تأكيد الإلغاء النهائي أضف في نهاية ردك:
+             ACTION_JSON: {{"action": "cancel", "phone": "الموبايل"}}
         """
 
         with st.chat_message("assistant"):
-            with st.spinner("..."):
-                parsed_response = None
-                last_err = ""
+            message_placeholder = st.empty()
+            full_reply_text = ""
+            last_err = ""
+            stream_success = False
 
-                for model_name in cached_flash_models:
+            for model_name in cached_flash_models:
+                try:
+                    cfg_kwargs = {"temperature": 0.2}
+                    if "2.5" in model_name:
+                        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
+                    response_stream = gemini_client.models.generate_content_stream(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                    
+                    for chunk in response_stream:
+                        if chunk.text:
+                            full_reply_text += chunk.text
+                            # إخفاء ACTION_JSON أثناء البث الحي ليكون العرض نظيفاً
+                            clean_live = re.sub(r"ACTION_JSON:.*", "", full_reply_text, flags=re.DOTALL).strip()
+                            message_placeholder.markdown(clean_live + "▌")
+                    
+                    stream_success = True
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    full_reply_text = ""
+                    continue
+
+            if stream_success and full_reply_text:
+                ticket_html = ""
+                action_match = re.search(r"ACTION_JSON:\s*(\{.*?\})", full_reply_text)
+                if action_match:
                     try:
-                        cfg_kwargs = {
-                            "temperature": 0.2,
-                            "response_mime_type": "application/json",
-                        }
-                        if "2.5" in model_name:
-                            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+                        act_data = json.loads(action_match.group(1))
+                        act_type = act_data.get("action")
 
-                        response = gemini_client.models.generate_content(
-                            model=model_name,
-                            contents=prompt,
-                            config=types.GenerateContentConfig(**cfg_kwargs),
-                        )
-                        raw_json = response.text.strip()
-                        raw_json = re.sub(r"^```json\s*|\s*```$", "", raw_json)
-                        parsed_response = json.loads(raw_json)
-                        break
-                    except Exception as e:
-                        last_err = str(e)
-                        continue
-
-                if parsed_response:
-                    reply_text = parsed_response.get("reply", "")
-                    act_type = parsed_response.get("action_type", "none")
-                    ticket_html = ""
-
-                    try:
                         if act_type == "create":
-                            c_name = parsed_response.get("name", "غير محدد")
-                            c_phone = parsed_response.get("phone", "")
-                            c_service = parsed_response.get("service", "كشف")
-                            c_day = parsed_response.get("day", "")
-                            c_date = parsed_response.get("date", "")
-                            c_time = parsed_response.get("time", "")
+                            c_name = act_data.get("name", "غير محدد")
+                            c_phone = act_data.get("phone", "")
+                            c_service = act_data.get("service", "كشف")
+                            c_day = act_data.get("day", "")
+                            c_date = act_data.get("date", "")
+                            c_time = act_data.get("time", "")
 
                             is_new = add_booking_to_sheet(c_name, c_phone, c_service, c_day, c_date, c_time)
                             if is_new:
@@ -459,10 +456,10 @@ with tab_chat:
                             ticket_html = build_ticket_buttons(c_phone, ticket_msg)
 
                         elif act_type == "update":
-                            u_phone = parsed_response.get("phone", "")
-                            u_day = parsed_response.get("day", "")
-                            u_date = parsed_response.get("date", "")
-                            u_time = parsed_response.get("time", "")
+                            u_phone = act_data.get("phone", "")
+                            u_day = act_data.get("day", "")
+                            u_date = act_data.get("date", "")
+                            u_time = act_data.get("time", "")
 
                             ok = update_booking_by_phone(u_phone, u_day, u_date, u_time)
                             if ok:
@@ -477,18 +474,18 @@ with tab_chat:
                                 ticket_html = build_ticket_buttons(u_phone, ticket_msg)
 
                         elif act_type == "cancel":
-                            ok = delete_booking_by_phone(parsed_response.get("phone", ""))
+                            ok = delete_booking_by_phone(act_data.get("phone", ""))
                             if ok:
                                 st.toast("🗑️ تم إلغاء الحجز وإبلاغ الإدارة!", icon="ℹ️")
 
                     except Exception as sheet_err:
                         st.error(f"حدث خطأ أثناء تحديث قاعدة البيانات: {sheet_err}")
 
-                    final_display = reply_text + ticket_html
-                    st.markdown(final_display, unsafe_allow_html=True)
-                    st.session_state.messages.append({"role": "assistant", "content": final_display})
-                else:
-                    st.error(f"تعذر الرد من الموديل. التفاصيل: {last_err}")
+                final_display = re.sub(r"ACTION_JSON:\s*\{.*?\}", "", full_reply_text).strip() + ticket_html
+                message_placeholder.markdown(final_display, unsafe_allow_html=True)
+                st.session_state.messages.append({"role": "assistant", "content": final_display})
+            else:
+                st.error(f"تعذر الرد من الموديل. التفاصيل: {last_err}")
 
 # ------------------------------------------
 # TAB 2: لوحة تحكم الإدارة والتحليلات الذكية
