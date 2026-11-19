@@ -1,12 +1,7 @@
 streamlit
 pandas
+pypdf
+google-genai
 gspread
 google-auth
-langchain
-langchain-community
-langchain-text-splitters
-langchain-huggingface
-sentence-transformers
-pypdf
-faiss-cpu
-google-genai
+google-auth-oauthlib
