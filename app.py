@@ -6,9 +6,6 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from google import genai
 from google.genai import types
 from google.oauth2.credentials import Credentials
@@ -25,12 +22,11 @@ PDF_FILE_NAME = "clinic_data.pdf"
 SHEET_NAME = "Clinic_Bookings"
 ADMIN_PASSWORD = "1234"
 
-# مواعيد العمل الرسمية (ساعات العمل بالنظام 24 ساعة: من 13 (1م) إلى 21 (9م))
 WORKING_HOURS_SLOTS = {
     13: "1م", 14: "2م", 15: "3م", 16: "4م",
     17: "5م", 18: "6م", 19: "7م", 20: "8م", 21: "9م"
 }
-OFF_DAYS = ["Friday"]  # الجمعة إجازة رسمية
+OFF_DAYS = ["Friday"]
 CLINIC_WORKING_HOURS_TEXT = "من السبت إلى الخميس، من الساعة 1 ظهراً حتى 10 مساءً (مدة الجلسة ساعة واحدة: 1م، 2م، 3م، 4م، 5م، 6م، 7م، 8م، 9م). الجمعة إجازة رسمية."
 EXPECTED_HEADERS = ["وقت التسجيل", "اسم العميل", "رقم الموبايل", "الخدمة", "اليوم", "التاريخ", "الساعة"]
 
@@ -76,15 +72,13 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. دوال التوقيت، الكاش الذكي، تذاكر الواتساب، و Google Sheets
+# 2. دوال التوقيت، الكاش السريع، تذاكر الواتساب، و Google Sheets
 # ==========================================
 def get_cairo_now():
-    """الحصول على التاريخ والوقت الفعلي في القاهرة (UTC+2)"""
     cairo_tz = timezone(timedelta(hours=2))
     return datetime.now(cairo_tz)
 
 def format_egypt_phone(raw_phone):
-    """تحويل رقم الموبايل المصري لصيغة واتساب الدولية (201xxxxxxxxx)"""
     digits = re.sub(r"\D", "", str(raw_phone))
     if digits.startswith("01") and len(digits) == 11:
         return "2" + digits
@@ -95,7 +89,6 @@ def format_egypt_phone(raw_phone):
     return digits
 
 def build_ticket_buttons(client_phone, ticket_message):
-    """إنشاء زرارين: حفظ التذكرة للعميل + إرسالها لواتساب العيادة"""
     encoded_msg = urllib.parse.quote(ticket_message)
     clean_client_wa = format_egypt_phone(client_phone)
     
@@ -108,7 +101,6 @@ def build_ticket_buttons(client_phone, ticket_message):
     return f'\n\n<div class="ticket-container">{client_btn}{clinic_btn}</div>'
 
 def send_telegram_alert(message_text):
-    """إرسال إشعار فوري للإدارة عبر Telegram Bot API بدون مكتبات خارجية"""
     if not tg_token or not tg_chat_id:
         return False
     try:
@@ -125,19 +117,29 @@ def send_telegram_alert(message_text):
         return False
 
 @st.cache_resource
+def load_clinic_pdf_text():
+    """قراءة نص الـ PDF مرة واحدة فقط وتخزينه في الذاكرة لسرعة فائقة"""
+    pdf_reader = PdfReader(PDF_FILE_NAME)
+    pages_text = [page.extract_text() for page in pdf_reader.pages if page.extract_text()]
+    return "\n".join(pages_text)
+
+@st.cache_resource
 def get_gemini_client_and_models():
-    """تهيئة عميل Gemini واستكشاف موديلات Flash المتاحة مرة واحدة فقط لسرعة الاستجابة"""
+    """تحديد وترتيب أسرع موديلات Flash المتاحة مرة واحدة فقط"""
     client = genai.Client(api_key=api_key, http_options={'api_version': 'v1beta'})
+    preferred_order = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
     try:
         available = [
             m.name.replace("models/", "")
             for m in client.models.list()
-            if "generateContent" in (m.supported_actions or []) and "gemini" in m.name.lower()
+            if "generateContent" in (m.supported_actions or []) and "flash" in m.name.lower()
+            and "thinking" not in m.name.lower() and "image" not in m.name.lower()
         ]
-        flash_models = [m for m in available if "flash" in m.lower()]
-        models = flash_models if flash_models else available
+        ordered = [m for m in preferred_order if m in available]
+        remaining = [m for m in available if m not in ordered]
+        models = ordered + remaining if (ordered + remaining) else preferred_order
     except Exception:
-        models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+        models = preferred_order
     return client, models
 
 @st.cache_resource
@@ -156,7 +158,6 @@ def ensure_headers(ws):
 
 @st.cache_data(ttl=15)
 def fetch_all_bookings():
-    """قراءة الحجوزات مع تخزين مؤقت 15 ثانية لتسريع الشات وتقليل استهلاك API"""
     try:
         ws = get_gsheet()
         ensure_headers(ws)
@@ -172,13 +173,11 @@ ARABIC_DAYS = {
 }
 
 def build_smart_availability_context(df_bookings):
-    """حساب الساعات المتاحة والمحجوزة بالبايثون بدقة 100% للأسبوعين القادمين"""
     now = get_cairo_now()
     current_time_str = now.strftime("%I:%M %p").replace("AM", "صباحاً").replace("PM", "مساءً")
     today_str = now.strftime("%Y-%m-%d")
     current_hour = now.hour
 
-    # تجميع الساعات المحجوزة لكل تاريخ
     booked_map = {}
     if not df_bookings.empty and "التاريخ" in df_bookings.columns and "الساعة" in df_bookings.columns:
         for _, row in df_bookings.iterrows():
@@ -188,7 +187,7 @@ def build_smart_availability_context(df_bookings):
 
     lines = [
         f"الوقت الحالي الآن: {ARABIC_DAYS[now.strftime('%A')]} {today_str} الساعة {current_time_str}",
-        "خريطة المواعيد المتاحة والمحجوزة للأيام الـ 14 القادمة (محسوبة بدقة):"
+        "خريطة المواعيد المتاحة والمحجوزة للأيام الـ 14 القادمة:"
     ]
 
     for i in range(14):
@@ -205,10 +204,8 @@ def build_smart_availability_context(df_bookings):
         day_booked = booked_map.get(d_str, [])
         available_slots = []
         for hour_24, slot_label in WORKING_HOURS_SLOTS.items():
-            # استبعاد الساعات التي فاتت اليوم
             if d_str == today_str and hour_24 <= current_hour:
                 continue
-            # التحقق مما إذا كانت الساعة محجوزة
             is_taken = any(slot_label.replace("م", "") in re.sub(r"\D", "", b) for b in day_booked if re.sub(r"\D", "", b))
             if not is_taken:
                 available_slots.append(slot_label)
@@ -223,7 +220,6 @@ def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
     ws = get_gsheet()
     ensure_headers(ws)
     
-    # فحص منع التكرار
     records = ws.get_all_records()
     clean_phone = re.sub(r"\D", "", str(phone))
     for row in records:
@@ -235,7 +231,7 @@ def add_booking_to_sheet(name, phone, service, day, date_str, time_slot):
 
     now_str = get_cairo_now().strftime("%Y-%m-%d %H:%M")
     ws.append_row([now_str, name, str(phone), service, day, date_str, time_slot])
-    st.cache_data.clear()  # تحديث الكاش فوراً
+    st.cache_data.clear()
     
     alert_msg = (
         f"🔔 <b>حجز جديد - {CLINIC_NAME}</b>\n\n"
@@ -306,35 +302,15 @@ def delete_booking_row(row_index_in_df):
     ws.delete_rows(int(row_index_in_df) + 2)
     st.cache_data.clear()
 
-# ==========================================
-# 3. تجهيز قاعدة المعرفة (RAG)
-# ==========================================
-@st.cache_resource
-def load_knowledge_base():
-    pdf_reader = PdfReader(PDF_FILE_NAME)
-    raw_text = ""
-    for page in pdf_reader.pages:
-        text = page.extract_text()
-        if text:
-            raw_text += text + "\n"
-            
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
-    chunks = text_splitter.split_text(raw_text)
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    return FAISS.from_texts(chunks, embedding=embeddings)
-
-with st.spinner("جاري تهيئة المساعد الذكي..."):
-    vector_store = load_knowledge_base()
-    gemini_client, cached_flash_models = get_gemini_client_and_models()
+# تحميل الكاش السريع
+clinic_knowledge_text = load_clinic_pdf_text()
+gemini_client, cached_flash_models = get_gemini_client_and_models()
 
 # ==========================================
-# 4. تقسيم الواجهة: واجهة العملاء + لوحة الإدارة
+# 3. تقسيم الواجهة: واجهة العملاء + لوحة الإدارة
 # ==========================================
 tab_chat, tab_admin = st.tabs(["💬 مساعد العملاء والحجز الذكي", "📊 لوحة تحكم الإدارة والتحليلات"])
 
-# ------------------------------------------
-# TAB 1: محادثة العملاء (Structured JSON + Fast Cache)
-# ------------------------------------------
 with tab_chat:
     col_header, col_wa = st.columns([3, 1])
     with col_header:
@@ -371,7 +347,6 @@ with tab_chat:
         df_current = fetch_all_bookings()
         availability_context = build_smart_availability_context(df_current)
 
-        # سجل الحجوزات للتحقق عند التعديل أو الإلغاء
         if not df_current.empty:
             client_records_text = "\n".join([
                 f"- {r.get('اسم العميل', '')} | موبايل: {r.get('رقم الموبايل', '')} | {r.get('الخدمة', '')} | {r.get('اليوم', '')} ({r.get('التاريخ', '')}) الساعة {r.get('الساعة', '')}"
@@ -380,8 +355,6 @@ with tab_chat:
         else:
             client_records_text = "لا توجد حجوزات مسجلة حالياً."
 
-        docs = vector_store.similarity_search(user_question, k=3)
-        context = "\n\n".join([doc.page_content for doc in docs])
         recent_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-8:]])
 
         prompt = f"""
@@ -398,7 +371,7 @@ with tab_chat:
         {client_records_text}
 
         === بيانات العيادة والأسعار ===
-        {context}
+        {clinic_knowledge_text}
 
         === سجل المحادثة ===
         {recent_history}
@@ -412,13 +385,12 @@ with tab_chat:
            - إذا ذكر العميل ساعة برقم فقط بدون تحديد (صباحاً أم مساءً/ظهراً) مثل "2" أو "9"، اسأله للتوضيح أولاً (ظهراً/مساءً أم صباحاً؟) ولا تفترض من تلقاء نفسك.
            - التزم تماماً بقائمة [المتاح] في "خريطة المواعيد المحسوبة بدقة". إذا طلب العميل يوماً مغلقاً أو ساعة غير موجودة في [المتاح]، اعتذر بلطف واعرض عليه أول 3 ساعات متاحة من القائمة.
         3. **فهم الأعراض وترشيح الخدمة:** إذا وصف العميل ألماً أو شكوى دون تسمية الخدمة، رشح له الخدمة المناسبة وسعرها من بيانات العيادة واعرض عليه الحجز.
-        4. **التأكيد على مرحلتين (مهم جداً):**
+        4. **التأكيد على مرحلتين:**
            - عند اكتمال بيانات الحجز الجديد، اعرض ملخص الحجز والتكلفة واسأل العميل للتأكيد النهائي واجعل `"action_type": "none"`.
            - فقط بعد موافقة العميل الصريحة (مثل: نعم، أكد، تمام)، اجعل `"action_type": "create"` واملأ الحقول.
            - ونفس الشيء للتعديل (`"update"`) والإلغاء (`"cancel"`): لا تنفذ الإجراء إلا بعد التحقق من رقم موبايل العميل في السجل وتأكيده.
 
         === صيغة المخرجات الإلزامية (JSON فقط) ===
-        أرجع ردك بصيغة JSON صالحة تماماً بهذا الهيكل:
         {{
           "reply": "ردك الطبيعي والودود للعميل بالعامية المصرية",
           "action_type": "none أو create أو update أو cancel",
@@ -432,19 +404,23 @@ with tab_chat:
         """
 
         with st.chat_message("assistant"):
-            with st.spinner("جاري الرد..."):
+            with st.spinner("..."):
                 parsed_response = None
                 last_err = ""
 
                 for model_name in cached_flash_models:
                     try:
+                        cfg_kwargs = {
+                            "temperature": 0.2,
+                            "response_mime_type": "application/json",
+                        }
+                        if "2.5" in model_name:
+                            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
                         response = gemini_client.models.generate_content(
                             model=model_name,
                             contents=prompt,
-                            config=types.GenerateContentConfig(
-                                temperature=0.2,
-                                response_mime_type="application/json"
-                            ),
+                            config=types.GenerateContentConfig(**cfg_kwargs),
                         )
                         raw_json = response.text.strip()
                         raw_json = re.sub(r"^```json\s*|\s*```$", "", raw_json)
